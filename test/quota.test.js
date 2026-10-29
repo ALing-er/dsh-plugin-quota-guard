@@ -370,6 +370,8 @@ test('an unreadable Bailian listing explains itself', async () => {
   assert.equal(account.status, 'unknown')
   assert.match(account.note, /无法读取百炼免费额度/)
   assert.match(account.note, /bl auth login/)
+  // The page uses this flag to pop the login dialog on its own.
+  assert.equal(controller.snapshot().cli.needsLogin, true)
 })
 
 test('every Bailian model out of quota hands the route to another provider', async () => {

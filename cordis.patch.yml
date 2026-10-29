@@ -30,6 +30,9 @@
         # 同平台模型耗尽、且监控列表没有其它可用账户时，自动探测该平台路由里
         # 未登记但有免费额度的模型，命中后直接接管（仅限百炼这类按模型读额度的平台）
         autoAdoptModels: true
+        # 账户需要百炼额度（bailian-free）但本机没有 bl CLI 时，自动执行
+        # npm i -g bailian-cli；登录仍需手动 bl auth login --console
+        autoInstallCli: true
         # 模型调用返回 QUOTA_EXCEEDED 时立刻标记账户不可用并切换重试
         switchOnQuotaError: true
         quotaErrorCodes: [QUOTA_EXCEEDED]

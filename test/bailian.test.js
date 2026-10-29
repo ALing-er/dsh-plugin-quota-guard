@@ -1,7 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { queryFreeQuota } from '../lib/bailian.js'
+import { queryFreeQuota, detectCli, installCli } from '../lib/bailian.js'
+
+test('detectCli distinguishes a missing binary from a working install', async () => {
+  const missing = Object.assign(new Error('spawn bl ENOENT'), { code: 'ENOENT' })
+  assert.deepEqual(
+    await detectCli({ run: async () => { throw missing } }),
+    { ok: false, reason: '未安装 bl CLI（npm i -g bailian-cli）' },
+  )
+  assert.deepEqual(await detectCli({ run: async () => '2.6.2\n' }), { ok: true, version: '2.6.2' })
+})
+
+test('installCli delegates to the provided installer', async () => {
+  assert.deepEqual(await installCli({ run: async () => ({ ok: true }) }), { ok: true })
+  assert.deepEqual(
+    await installCli({ run: async () => ({ ok: false, reason: 'npm 安装失败：offline' }) }),
+    { ok: false, reason: 'npm 安装失败：offline' },
+  )
+})
 
 test('queryFreeQuota normalizes the CLI listing', async () => {
   let asked = []

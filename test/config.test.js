@@ -17,6 +17,8 @@ test('defaults: no accounts, ten minute interval, QUOTA_EXCEEDED recovery', () =
   assert.equal(config.routeFreshMs, 60000)
   // Same-platform unregistered models are adopted automatically.
   assert.equal(config.autoAdoptModels, true)
+  // Missing local tools (Bailian CLI) are installed on demand.
+  assert.equal(config.autoInstallCli, true)
 })
 
 test('switchOrder only accepts auto or manual', () => {

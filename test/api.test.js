@@ -51,6 +51,7 @@ function createHarness(options = {}) {
     // Tests never shell out to the Bailian CLI unless they ask for it.
     freeQuotaProbe: options.freeQuota ?? (async () => ({ ok: false, reason: 'not in tests' })),
     switchForeground: options.switchForeground,
+    prepareCli: options.prepareCli,
   })
   return { api, calls, persisted, controller }
 }
@@ -153,6 +154,58 @@ test('switchModel adopts the model and switches the foreground', async () => {
     harness.api.switchModel({ provider: 'unknown', model: 'm' }),
     /路由/,
   )
+})
+
+test('saveAccount stores the platform API key once', async () => {
+  const stored = []
+  const writes = []
+  const harness = createHarness({
+    credentials: { set: async (ref, value) => { stored.push({ ref, value }) } },
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: { dashscope: { baseURL: 'https://ds.example/v1', api: 'openai-completions' } } } }],
+      mutate: async (ns, ops) => { writes.push({ ns, ops }) },
+    },
+  })
+  await harness.api.saveAccount({
+    id: 'dashscope-pro',
+    provider: 'dashscope',
+    model: 'deepseek-v4-pro-0813',
+    warnBelow: 10,
+    criticalBelow: 2,
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free' },
+    apiKey: 'sk-test-123',
+  })
+  assert.deepEqual(stored, [{ ref: 'DASHSCOPE_API_KEY', value: 'sk-test-123' }])
+  // The route has no declared reference yet, so the plugin declares one.
+  assert.deepEqual(writes, [{
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'set', path: ['providers', 'dashscope', 'apiKeyEnv'], value: 'DASHSCOPE_API_KEY' }],
+  }])
+})
+
+test('clearProvider removes every model of one platform', async () => {
+  const writes = []
+  const harness = createHarness({
+    providers: [{ id: 'dashscope', name: '百炼' }],
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: { dashscope: { baseURL: 'https://ds.example/v1', api: 'openai-completions' } } } }],
+      mutate: async (ns, ops) => { writes.push({ ns, ops }) },
+    },
+  })
+  await harness.api.saveAccount({ id: 'a', provider: 'dashscope', model: 'm-a', warnBelow: 10, criticalBelow: 2, balance: { kind: 'none' } })
+  await harness.api.saveAccount({ id: 'b', provider: 'dashscope', model: 'm-b', warnBelow: 10, criticalBelow: 2, balance: { kind: 'none' } })
+  await harness.api.saveAccount({ id: 'c', provider: 'ant-ling', model: 'm-c', warnBelow: 10, criticalBelow: 2, balance: { kind: 'none' } })
+  const snapshot = await harness.api.clearProvider({ provider: 'dashscope' })
+  assert.deepEqual(snapshot.accounts.map((account) => account.id), ['c'])
+  assert.deepEqual(writes, [{ ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'dashscope'] }] }])
+})
+
+test('setupCli delegates to the local tool installer', async () => {
+  const harness = createHarness({ prepareCli: async () => ({ ok: true, detail: 'bl 已安装（2.6.2）' }) })
+  assert.deepEqual(await harness.api.setupCli(), { ok: true, detail: 'bl 已安装（2.6.2）' })
 })
 
 test('a failed foreground switch does not claim the route', async () => {
