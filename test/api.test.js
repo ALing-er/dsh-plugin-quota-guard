@@ -17,6 +17,7 @@ function createHarness(options = {}) {
     get(name) {
       if (name === 'settings') return options.settings
       if (name === 'credentials') return options.credentials
+      if (name === 'agentDefaultModel') return options.defaults
       if (name === 'llm') {
         return {
           listProviders: () => options.providers ?? [],
@@ -42,6 +43,8 @@ function createHarness(options = {}) {
       persisted.push(accounts.map((account) => account.id))
     },
     storePath: 'C:/tmp/quota-guard.json',
+    // Same seam for the controller: tests never shell out to the CLI.
+    freeQuotaProbe: options.freeQuota ?? (async () => ({ ok: false, reason: 'not in tests' })),
   })
   const api = createApi({
     ctx,
@@ -178,11 +181,18 @@ test('saveAccount stores the platform API key once', async () => {
     apiKey: 'sk-test-123',
   })
   assert.deepEqual(stored, [{ ref: 'DASHSCOPE_API_KEY', value: 'sk-test-123' }])
-  // The route has no declared reference yet, so the plugin declares one.
-  assert.deepEqual(writes, [{
-    ns: 'llm-pi-ai',
-    ops: [{ op: 'set', path: ['providers', 'dashscope', 'apiKeyEnv'], value: 'DASHSCOPE_API_KEY' }],
-  }])
+  assert.deepEqual(writes, [
+    // The model must be callable before the account points at it.
+    {
+      ns: 'llm-pi-ai',
+      ops: [{ op: 'set', path: ['providers', 'dashscope', 'models'], value: [{ id: 'deepseek-v4-pro-0813' }] }],
+    },
+    // The route has no declared reference yet, so the plugin declares one.
+    {
+      ns: 'llm-pi-ai',
+      ops: [{ op: 'set', path: ['providers', 'dashscope', 'apiKeyEnv'], value: 'DASHSCOPE_API_KEY' }],
+    },
+  ])
 })
 
 test('clearProvider removes every model of one platform', async () => {
@@ -200,7 +210,80 @@ test('clearProvider removes every model of one platform', async () => {
   await harness.api.saveAccount({ id: 'c', provider: 'ant-ling', model: 'm-c', warnBelow: 10, criticalBelow: 2, balance: { kind: 'none' } })
   const snapshot = await harness.api.clearProvider({ provider: 'dashscope' })
   assert.deepEqual(snapshot.accounts.map((account) => account.id), ['c'])
-  assert.deepEqual(writes, [{ ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'dashscope'] }] }])
+  assert.deepEqual(writes.at(-1), { ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'dashscope'] }] })
+})
+
+test('saveAccount appends a new model to the platform route', async () => {
+  const writes = []
+  const harness = createHarness({
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        value: {
+          providers: {
+            dashscope: {
+              baseURL: 'https://ds.example/v1',
+              api: 'openai-completions',
+              models: [{ id: 'qwen-plus', name: 'Qwen Plus' }],
+            },
+          },
+        },
+      }],
+      mutate: async (ns, ops) => { writes.push({ ns, ops }) },
+    },
+  })
+  await harness.api.saveAccount({
+    id: 'dashscope-qwen3-8-flash',
+    provider: 'dashscope',
+    model: 'qwen3.8-flash',
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free' },
+  })
+  assert.deepEqual(writes, [{
+    ns: 'llm-pi-ai',
+    ops: [{
+      op: 'set',
+      path: ['providers', 'dashscope', 'models'],
+      value: [{ id: 'qwen-plus', name: 'Qwen Plus' }, { id: 'qwen3.8-flash' }],
+    }],
+  }])
+})
+
+test('syncRouteModels makes already-registered accounts callable', async () => {
+  const writes = []
+  const profile = { baseURL: 'https://ds.example/v1', api: 'openai-completions', models: [{ id: 'qwen-plus' }] }
+  const harness = createHarness({
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: { dashscope: profile } } }],
+      mutate: async (ns, ops) => {
+        writes.push({ ns, ops })
+        const value = ops[0]?.value
+        if (Array.isArray(value)) profile.models = value
+      },
+    },
+  })
+  // An account saved by a build that never touched the route catalog.
+  await harness.api.saveAccount({ id: 'f', provider: 'dashscope', model: 'qwen3.8-flash', balance: { kind: 'none' } })
+  assert.deepEqual(profile.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+  // A second pass finds nothing missing and writes nothing.
+  const before = writes.length
+  await harness.api.syncRouteModels()
+  assert.equal(writes.length, before)
+})
+
+test('a profile that is not pi-ai shaped is never rewritten', async () => {
+  const writes = []
+  const harness = createHarness({
+    configurable: [{ provider: 'ant-ling', settingsNs: 'llm-ant-ling', settingsPath: [] }],
+    settings: {
+      describe: () => [{ ns: 'llm-ant-ling', value: { apiKeyEnv: 'ANT_LING_API_KEY' } }],
+      mutate: async (ns, ops) => { writes.push({ ns, ops }) },
+    },
+  })
+  await harness.api.saveAccount({ id: 'ant', provider: 'ant-ling', model: 'ling-mini', balance: { kind: 'none' } })
+  assert.deepEqual(writes, [])
 })
 
 test('setupCli delegates to the local tool installer', async () => {
@@ -275,6 +358,81 @@ test('recommendations are advisory and never mutate the account list', async () 
   assert.equal(harness.controller.accounts().length, 1)
 })
 
+test('recommendations include allowance models the route has not declared', async () => {
+  const harness = createHarness({
+    freeQuota: async () => ({
+      ok: true,
+      models: [
+        { model: 'qwen3.8-flash', type: 'Text', hasQuota: true, remaining: 947461, total: 1000000, remainingPercent: 94.7 },
+        { model: 'kimi-k3', type: 'Text', hasQuota: true, remaining: 999507, total: 1000000, remainingPercent: 100 },
+        { model: 'qwen3-asr-flash', type: 'Audio', hasQuota: true, remaining: 35969, total: 36000, remainingPercent: 99.9 },
+      ],
+    }),
+  })
+  await harness.api.saveAccount({
+    id: 'dashscope-plus',
+    provider: 'dashscope',
+    model: 'qwen-plus',
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free' },
+  })
+  const result = await harness.api.recommendations({ provider: 'dashscope' })
+  assert.deepEqual(result.models.map((row) => row.model), ['kimi-k3', 'qwen3.8-flash'])
+  // Advisory only: nothing was adopted behind the user's back.
+  assert.equal(harness.controller.accounts().length, 1)
+})
+
+test('a brand-new Bailian route discovers models from its allowance', async () => {
+  const harness = createHarness({
+    listModels: async () => [],
+    freeQuota: async () => ({
+      ok: true,
+      models: [
+        { model: 'qwen-plus', type: 'Text', hasQuota: true, remaining: 0, total: 1000000, remainingPercent: 0 },
+        { model: 'qwen3.8-flash', type: 'Text', hasQuota: true, remaining: 947461, total: 1000000, remainingPercent: 94.7 },
+        { model: 'qwen3-asr-flash', type: 'Audio', hasQuota: true, remaining: 35969, total: 36000, remainingPercent: 99.9 },
+      ],
+    }),
+  })
+  // No route exists yet, so the CLI list is the only catalog available.
+  const result = await harness.api.discoverModels({ provider: 'dashscope' })
+  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+})
+
+test('a Bailian route also offers allowance models it has not declared', async () => {
+  const harness = createHarness({
+    providers: [{ id: 'dashscope', name: '百炼' }],
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        value: {
+          providers: {
+            dashscope: {
+              baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              api: 'openai-completions',
+              models: [{ id: 'qwen-plus' }],
+            },
+          },
+        },
+      }],
+    },
+    listModels: async () => [{ id: 'qwen-plus' }],
+    freeQuota: async () => ({
+      ok: true,
+      models: [
+        { model: 'qwen-plus', type: 'Text', hasQuota: true, remaining: 0, total: 1000000, remainingPercent: 0 },
+        { model: 'qwen3.8-flash', type: 'Text', hasQuota: true, remaining: 947461, total: 1000000, remainingPercent: 94.7 },
+        { model: 'qwen3-asr-flash', type: 'Audio', hasQuota: true, remaining: 35969, total: 36000, remainingPercent: 99.9 },
+        { model: 'expired-model', type: 'Text', hasQuota: false, remaining: 0, total: 0, remainingPercent: 0 },
+      ],
+    }),
+  })
+  const result = await harness.api.discoverModels({ provider: 'dashscope' })
+  // Chat models with allowance are offered; audio rows and spent models are not.
+  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+})
+
 test('removing the last account of a route releases the provider', async () => {
   const writes = []
   const harness = createHarness({
@@ -288,6 +446,7 @@ test('removing the last account of a route releases the provider', async () => {
   await harness.api.saveAccount({ id: 'qwen-plus', provider: 'dashscope', model: 'qwen-plus', balance: { kind: 'none' } })
   await harness.api.deleteAccount({ id: 'qwen-plus' })
   assert.deepEqual(writes, [
+    { ns: 'pi-ai', ops: [{ op: 'set', path: ['providers', 'dashscope', 'models'], value: [{ id: 'qwen-plus' }] }] },
     { ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'dashscope'] }] },
   ])
 })
@@ -305,7 +464,8 @@ test('a route with another monitored account is kept', async () => {
   await harness.api.saveAccount({ id: 'qwen-plus', provider: 'dashscope', model: 'qwen-plus', balance: { kind: 'none' } })
   await harness.api.saveAccount({ id: 'qwen-max', provider: 'dashscope', model: 'qwen-max', balance: { kind: 'none' } })
   await harness.api.deleteAccount({ id: 'qwen-plus' })
-  assert.deepEqual(writes, [])
+  // Only the route-model sync writes; the route itself must not be released.
+  assert.deepEqual(writes.filter((write) => write.ops.some((op) => op.op === 'unset')), [])
 })
 
 test('createProvider writes the route, stores the key, and registers the account', async () => {
@@ -388,6 +548,67 @@ test('createProvider on an existing pi-ai route merges its model list', async ()
   assert.deepEqual(profile.models.map((model) => model.id), ['old-model', 'qwen-plus'])
   assert.equal(profile.apiKeyEnv, 'DASHSCOPE_API_KEY')
   assert.equal(snapshot.accounts.length, 1)
+})
+
+test('clearProvider moves the deployment default to a surviving account', async () => {
+  const saved = []
+  const harness = createHarness({
+    defaults: {
+      currentSelection: () => ({ provider: 'dashscope', model: 'qwen-plus' }),
+      saveSelection: async (selection) => { saved.push(selection) },
+    },
+    settings: {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        value: { providers: { dashscope: { baseURL: 'https://ds.example/v1', api: 'openai-completions', models: [] } } },
+      }],
+      mutate: async () => {},
+    },
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+  })
+  await harness.api.saveAccount({
+    id: 'dashscope-plus',
+    provider: 'dashscope',
+    model: 'qwen-plus',
+    priority: 100,
+    balance: { kind: 'none' },
+  })
+  await harness.api.saveAccount({
+    id: 'other-model',
+    provider: 'other',
+    model: 'm',
+    priority: 50,
+    balance: { kind: 'none' },
+  })
+  await harness.api.clearProvider({ provider: 'dashscope' })
+  // The default would otherwise point at a provider id that no longer exists.
+  assert.deepEqual(saved, [{ provider: 'other', model: 'm' }])
+})
+
+test('createProvider keeps the settings of an account it re-declares', async () => {
+  const harness = createHarness({
+    settings: { mutate: async () => {} },
+    credentials: { set: async () => {} },
+    providers: [],
+  })
+  await harness.api.saveAccount({
+    id: 'dashscope-qwen3-8-flash',
+    provider: 'dashscope',
+    model: 'qwen3.8-flash',
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free', warnPercent: 15, criticalPercent: 3 },
+  })
+  await harness.api.createProvider({
+    route: 'dashscope',
+    api: 'openai-completions',
+    baseURL: 'https://ds.example/v1',
+    models: [{ id: 'qwen3.8-flash' }],
+    account: { model: 'qwen3.8-flash' },
+  })
+  const account = harness.controller.accounts().find((entry) => entry.id === 'dashscope-qwen3-8-flash')
+  assert.equal(account.quota.kind, 'bailian-free')
+  assert.equal(account.quota.warnPercent, 15)
+  assert.equal(account.quota.criticalPercent, 3)
 })
 
 test('createProvider still rejects a route owned by another adapter', async () => {
