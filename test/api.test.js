@@ -208,6 +208,36 @@ test('setupCli delegates to the local tool installer', async () => {
   assert.deepEqual(await harness.api.setupCli(), { ok: true, detail: 'bl 已安装（2.6.2）' })
 })
 
+test('adding a Bailian account asks for the CLI installer once', async () => {
+  let calls = 0
+  const harness = createHarness({
+    prepareCli: async () => {
+      calls += 1
+      return { ok: true, detail: 'bl 已安装' }
+    },
+  })
+  await harness.api.saveAccount({
+    id: 'bailian-a',
+    provider: 'dashscope',
+    model: 'qwen-plus',
+    warnBelow: 10,
+    criticalBelow: 2,
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free' },
+  })
+  await harness.api.saveAccount({
+    id: 'bailian-b',
+    provider: 'dashscope',
+    model: 'qwen-max',
+    warnBelow: 10,
+    criticalBelow: 2,
+    balance: { kind: 'none' },
+    quota: { kind: 'bailian-free' },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(calls, 1)
+})
+
 test('a failed foreground switch does not claim the route', async () => {
   const harness = createHarness({
     switchForeground: async () => ({ mode: 'default', reason: 'session not found' }),

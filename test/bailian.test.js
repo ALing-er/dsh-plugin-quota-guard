@@ -20,6 +20,16 @@ test('installCli delegates to the provided installer', async () => {
   )
 })
 
+test('a GBK “command not found” message is decoded before matching', async () => {
+  // GBK bytes for 不是内部或外部命令, as cmd.exe prints on a Chinese system.
+  const gbk = Buffer.from('b2bbcac7c4dab2bfbbf2cde2b2bfc3fcc1ee', 'hex')
+  const result = await queryFreeQuota({
+    run: async () => { throw Object.assign(new Error('Command failed'), { stderr: gbk }) },
+  })
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /未安装 bl CLI/)
+})
+
 test('queryFreeQuota normalizes the CLI listing', async () => {
   let asked = []
   const result = await queryFreeQuota({
