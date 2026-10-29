@@ -30,6 +30,23 @@ test('a GBK “command not found” message is decoded before matching', async (
   assert.match(result.reason, /未安装 bl CLI/)
 })
 
+test('an unauthenticated CLI is reported as a login problem, not a failure', async () => {
+  // The CLI exits non-zero and prints its JSON error document on stderr.
+  const stderr = JSON.stringify({
+    error: { code: 3, message: 'No console access token found', hint: "Run 'bl auth login --console'" },
+  })
+  const failed = await queryFreeQuota({
+    run: async () => { throw Object.assign(new Error('Command failed'), { stderr }) },
+  })
+  assert.equal(failed.ok, false)
+  assert.match(failed.reason, /未登录/)
+
+  // Some versions answer with the same document on stdout and exit zero.
+  const answered = await queryFreeQuota({ run: async () => stderr })
+  assert.equal(answered.ok, false)
+  assert.match(answered.reason, /未登录/)
+})
+
 test('queryFreeQuota normalizes the CLI listing', async () => {
   let asked = []
   const result = await queryFreeQuota({
