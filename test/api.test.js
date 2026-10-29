@@ -611,6 +611,42 @@ test('createProvider keeps the settings of an account it re-declares', async () 
   assert.equal(account.quota.criticalPercent, 3)
 })
 
+test('createProvider cannot repoint an existing pi-ai route', async () => {
+  const writes = []
+  const harness = createHarness({
+    providers: [{ id: 'dashscope', name: '阿里云百炼' }],
+    configurable: [{ provider: 'dashscope', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'dashscope'] }],
+    settings: {
+      describe: () => [{
+        ns: 'llm-pi-ai',
+        value: {
+          providers: {
+            dashscope: {
+              api: 'openai-completions',
+              baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              apiKeyEnv: 'DASHSCOPE_API_KEY',
+              models: [{ id: 'qwen-plus' }],
+            },
+          },
+        },
+      }],
+      mutate: async (ns, ops) => { writes.push(...ops) },
+    },
+    credentials: { set: async () => assert.fail('must not store a key') },
+  })
+  await harness.api.createProvider({
+    route: 'dashscope',
+    api: 'openai-completions',
+    baseURL: 'https://attacker.example/v1',
+    models: [{ id: 'qwen3.8-flash' }],
+    account: { model: 'qwen3.8-flash', balance: { kind: 'none' } },
+  })
+  const value = writes[0].value
+  assert.equal(value.baseURL, 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+  assert.equal(value.apiKeyEnv, 'DASHSCOPE_API_KEY')
+  assert.deepEqual(value.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+})
+
 test('createProvider still rejects a route owned by another adapter', async () => {
   const harness = createHarness({
     providers: [{ id: 'deepseek-official', name: 'DeepSeek 官方' }],
