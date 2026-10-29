@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { normalizeConfig } from '../lib/config.js'
 import { createController } from '../lib/controller.js'
-import { createApi, credentialRefFor } from '../lib/api.js'
+import { createApi, credentialRefFor, modelKind } from '../lib/api.js'
 
 /**
  * Build an API instance over a real controller with in-memory persistence.
@@ -394,9 +394,11 @@ test('a brand-new Bailian route discovers models from its allowance', async () =
       ],
     }),
   })
-  // No route exists yet, so the CLI list is the only catalog available.
+  // No route exists yet, so the CLI list is the only catalog available; every
+  // family with allowance is listed and carries its kind for the picker.
   const result = await harness.api.discoverModels({ provider: 'dashscope' })
-  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash', 'qwen3-asr-flash'])
+  assert.deepEqual(result.models.map((model) => model.kind), ['text', 'text', 'audio'])
 })
 
 test('a Bailian route also offers allowance models it has not declared', async () => {
@@ -429,8 +431,61 @@ test('a Bailian route also offers allowance models it has not declared', async (
     }),
   })
   const result = await harness.api.discoverModels({ provider: 'dashscope' })
-  // Chat models with allowance are offered; audio rows and spent models are not.
-  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash'])
+  // Every model family with allowance is offered — the page filters by kind —
+  // while spent models are dropped.
+  assert.deepEqual(result.models.map((model) => model.id), ['qwen-plus', 'qwen3.8-flash', 'qwen3-asr-flash'])
+  assert.equal(result.models.at(-1).kind, 'audio')
+})
+
+test('modelKind separates chat, embedding, rerank, image, video and speech models', () => {
+  assert.equal(modelKind('qwen3.8-flash'), 'text')
+  assert.equal(modelKind('text-embedding-v4'), 'embedding')
+  assert.equal(modelKind('bge-m3'), 'embedding')
+  assert.equal(modelKind('gte-rerank-v2'), 'rerank')
+  assert.equal(modelKind('wanx2.1-t2i-turbo'), 'image')
+  assert.equal(modelKind('wanx2.1-t2v-turbo'), 'video')
+  assert.equal(modelKind('qwen-tts'), 'audio')
+  assert.equal(modelKind('paraformer-realtime-v2'), 'audio')
+  // The platform's own label wins over the id heuristics.
+  assert.equal(modelKind('qwen3-asr-flash', 'Text'), 'text')
+  assert.equal(modelKind('mystery-model', 'Embedding'), 'embedding')
+  // Bailian labels rerankers as `Embedding`, so the id gets the last word.
+  assert.equal(modelKind('qwen3.7-text-rerank', 'Embedding'), 'rerank')
+  // `Vision` covers both image and video models.
+  assert.equal(modelKind('qwen-image-2.1-turbo', 'Vision'), 'image')
+  assert.equal(modelKind('wan3.0-video', 'Vision'), 'video')
+  // `Multimodal` covers omni chat models and speech models.
+  assert.equal(modelKind('qwen3.8-omni-flash', 'Multimodal'), 'text')
+  assert.equal(modelKind('qwen-audio-3.1-tts-flash', 'Multimodal'), 'audio')
+  // A dashboard row without a type label still classifies by id.
+  assert.equal(modelKind('some-model', '-'), 'text')
+})
+
+test('discovered models carry the family the picker filters on', async () => {
+  const harness = createHarness({
+    providers: [{ id: 'gateway', name: '网关' }],
+    listModels: async () => [
+      { id: 'deepseek-v4-flash' },
+      { id: 'text-embedding-v4' },
+      { id: 'gte-rerank-v2' },
+      { id: 'wanx2.1-t2i-turbo' },
+      { id: 'wanx2.1-t2v-turbo' },
+      { id: 'qwen-tts' },
+    ],
+    freeQuota: async () => ({ ok: false }),
+  })
+  const result = await harness.api.discoverModels({ provider: 'gateway' })
+  assert.deepEqual(
+    result.models.map((model) => [model.id, model.kind]),
+    [
+      ['deepseek-v4-flash', 'text'],
+      ['text-embedding-v4', 'embedding'],
+      ['gte-rerank-v2', 'rerank'],
+      ['wanx2.1-t2i-turbo', 'image'],
+      ['wanx2.1-t2v-turbo', 'video'],
+      ['qwen-tts', 'audio'],
+    ],
+  )
 })
 
 test('removing the last account of a route releases the provider', async () => {
@@ -893,8 +948,8 @@ test('discoverModels asks the namespace that owns an existing route', async () =
   const result = await harness.api.discoverModels({ provider: 'acme' })
   assert.deepEqual(observed, { ns: 'acme-ns', request: { provider: 'acme' } })
   assert.deepEqual(result.models, [
-    { id: 'acme-large', name: 'Acme Large', contextWindow: 65536 },
-    { id: 'acme-small' },
+    { id: 'acme-large', kind: 'text', name: 'Acme Large', contextWindow: 65536 },
+    { id: 'acme-small', kind: 'text' },
   ])
 })
 
@@ -1008,7 +1063,7 @@ test('discoverModels falls through namespaces and normalizes ids', async () => {
   })
   const result = await harness.api.discoverModels({ baseURL: 'https://gw.example/v1' })
   assert.deepEqual(tried, ['broken-ns', 'llm-pi-ai'])
-  assert.deepEqual(result.models, [{ id: 'a' }, { id: 'b' }])
+  assert.deepEqual(result.models, [{ id: 'a', kind: 'text' }, { id: 'b', kind: 'text' }])
 })
 
 test('discoverModels surfaces the last failure and validates its input', async () => {
@@ -1040,8 +1095,8 @@ test('discoverModels prefers the adapter catalog of an existing route', async ()
   const result = await harness.api.discoverModels({ provider: 'deepseek-account' })
   assert.equal(discoverCalls, 0)
   assert.deepEqual(result.models, [
-    { id: 'deepseek-flash', name: 'DeepSeek Flash' },
-    { id: 'deepseek-pro', name: 'DeepSeek Pro' },
+    { id: 'deepseek-flash', kind: 'text', name: 'DeepSeek Flash' },
+    { id: 'deepseek-pro', kind: 'text', name: 'DeepSeek Pro' },
   ])
 })
 
@@ -1056,7 +1111,7 @@ test('an empty catalog falls through to endpoint discovery', async () => {
   })
   const result = await harness.api.discoverModels({ provider: 'acme' })
   assert.deepEqual(calls, ['llm-pi-ai'])
-  assert.deepEqual(result.models, [{ id: 'm1' }])
+  assert.deepEqual(result.models, [{ id: 'm1', kind: 'text' }])
 })
 
 test('an existing route without catalog or discovery gets an actionable message', async () => {
