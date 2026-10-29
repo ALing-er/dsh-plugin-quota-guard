@@ -1,0 +1,40 @@
+{
+  "name": "dsh-plugin-quota-guard",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness (dsh) 多平台模型额度守卫：余额探测、预警与自动切换",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "quota",
+    "balance",
+    "failover"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,137 @@
+# quota-guard bundle patch — 安装到 profile 后自动插入一行插件。
+#
+# 装好后打开 dsh Web 的「设置 → 模型额度」，可以直接查看余额、增删监控账户、
+# 并新建第三方提供方（会写入 llm-pi-ai 路由与 API Key）。下面的 config 只是
+# 首次启动的默认值；在设置页里改动会持久化到 $DSH_HOME/quota-guard.json。
+#
+# 这一层只作为“组合 base”：用户在 profile 自己的 cordis.patch.yml 里写
+#   - id: quota-guard
+#     config: { ... }
+# 会整份替换下面的 config（patch 是整行 config 覆盖，不是深合并）。
+#
+# 默认只监控 DeepSeek 官方路由：余额接口可查、无需额外配置。
+# 想实现“余额不足自动切换”，至少再加一个账户（见文件末尾示例）。
+
+- insert:
+    - id: quota-guard
+      name: 'dsh-plugin-quota-guard'
+      config:
+        # 余额轮询间隔（毫秒），最小 30000
+        intervalMs: 600000
+        # 单次余额请求超时
+        probeTimeoutMs: 8000
+        # 当前账户余额跌破 criticalBelow 时自动把请求改投到更健康的账户
+        autoSwitch: true
+        # 二级切换顺序：auto 按健康度自动选（默认），manual 按优先级手动排
+        switchOrder: auto
+        # 路由决策前允许的数据年龄（毫秒）：超过就先重查该账户再决定是否切换，
+        # 后台也会按这个窗口的一半自动补查，额度刚耗尽时不会漏切
+        routeFreshMs: 60000
+        # 同平台模型耗尽、且监控列表没有其它可用账户时，自动探测该平台路由里
+        # 未登记但有免费额度的模型，命中后直接接管（仅限百炼这类按模型读额度的平台）
+        autoAdoptModels: true
+        # 模型调用返回 QUOTA_EXCEEDED 时立刻标记账户不可用并切换重试
+        switchOnQuotaError: true
+        quotaErrorCodes: [QUOTA_EXCEEDED]
+        # 额度错误后该账户的冷却时间
+        quotaCooldownMs: 900000
+        # 探针持续失败超过该时长且无价格表时，状态降级为 unknown
+        staleAfterMs: 21600000
+
+        # 默认不监控任何账户：不同 profile 的 provider 路由名不一样
+        # （deepseek-official / deepseek-account / 自定义 pi-ai 路由），
+        # 打开「设置 → 模型额度」按实际路由添加即可。
+        # 也可以在这里预置，示例见文件末尾。
+        accounts: []
+
+        alert:
+          # 通用 webhook；填上后预警会推送到群机器人
+          webhookUrl: ''
+          # generic | feishu | dingtalk
+          format: generic
+          # 同一账户的预警最小间隔
+          minIntervalMs: 1800000
+          # 自动切换时也推送一条
+          onSwitch: true
+          timeoutMs: 8000
+
+# ---------------------------------------------------------------------------
+# 多平台示例：先在 llm-pi-ai 里声明路由，再在 accounts 里登记同一个 provider。
+# 下面每一段都需要自己的 API Key（$DSH_HOME/.credentials.yaml 或进程环境变量）。
+# 启用时把对应行放进 profile 的 cordis.patch.yml，并把 provider 名对齐。
+#
+# - id: llm-pi-ai
+#   config:
+#     providers:
+#       # OpenAI（余额无公开接口：status 走 unknown，只在 QUOTA_EXCEEDED 时报错切换）
+#       openai:
+#         apiKeyEnv: OPENAI_API_KEY
+#       # Kimi / Moonshot 中国区：有官方余额接口
+#       moonshotai-cn:
+#         apiKeyEnv: MOONSHOT_API_KEY
+#         models:
+#           - id: kimi-k2-0905-preview
+#       # 智谱 GLM（CN coding 套餐）：无余额接口，按错误码驱动
+#       zai-coding-cn:
+#         apiKeyEnv: ZAI_CODING_CN_API_KEY
+#       # 通义千问（Token 套餐）
+#       qwen-token-plan-cn:
+#         apiKeyEnv: QWEN_TOKEN_PLAN_CN_API_KEY
+#       # 火山方舟：pi-ai 没有内置 catalog，需整条手工声明
+#       volcengine:
+#         displayName: 火山方舟
+#         apiKeyEnv: ARK_API_KEY
+#         api: openai-completions
+#         baseURL: https://ark.cn-beijing.volces.com/api/v3
+#         models:
+#           - id: doubao-seed-1-6-250615
+#             contextWindow: 262144
+#             maxTokens: 32768
+#
+# - id: quota-guard
+#   config:
+#     autoSwitch: true
+#     accounts:
+#       - id: deepseek
+#         provider: deepseek-official
+#         model: deepseek-v4-flash
+#         priority: 10
+#         warnBelow: 10
+#         criticalBelow: 2
+#         balance: { kind: deepseek, apiKeyEnv: DEEPSEEK_API_KEY }
+#       - id: kimi
+#         label: Kimi
+#         provider: moonshotai-cn
+#         model: kimi-k2-0905-preview
+#         priority: 20
+#         warnBelow: 5
+#         criticalBelow: 1
+#         balance: { kind: moonshot, apiKeyEnv: MOONSHOT_API_KEY }
+#       - id: zhipu
+#         label: 智谱 GLM
+#         provider: zai-coding-cn
+#         model: glm-4.6
+#         priority: 30
+#         balance: { kind: none }
+#       - id: qwen
+#         label: 通义千问
+#         provider: qwen-token-plan-cn
+#         model: qwen3-coder-plus
+#         priority: 40
+#         balance: { kind: none }
+#       - id: ark
+#         label: 火山方舟
+#         provider: volcengine
+#         model: doubao-seed-1-6-250615
+#         priority: 50
+#         # 若你的网关提供余额 JSON，可改用通用探针：
+#         # balance:
+#         #   kind: http
+#         #   url: https://your-gateway.example/api/credits
+#         #   apiKeyEnv: GATEWAY_KEY
+#         #   jsonPath: data.remaining
+#         #   currency: CNY
+#         balance: { kind: none }
+#     alert:
+#       webhookUrl: https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+#       format: feishu
